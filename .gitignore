@@ -1,0 +1,4 @@
+out/
+*.aria2
+*.part
+*.tmp

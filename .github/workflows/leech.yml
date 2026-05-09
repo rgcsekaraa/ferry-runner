@@ -1,0 +1,142 @@
+name: Leech to Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: Magnet link or HTTP/HTTPS URL
+        required: true
+        type: string
+      job_id:
+        description: Ferry job ID
+        required: true
+        type: string
+      callback_url:
+        description: Ferry webhook URL
+        required: true
+        type: string
+      drive_folder:
+        description: Google Drive folder
+        required: false
+        default: Ferry
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  leech:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Report started
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          JOB_ID: ${{ inputs.job_id }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, hmac, json, os, urllib.request
+          body = json.dumps({"jobId": os.environ["JOB_ID"], "status": "running"}).encode()
+          sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
+              "Content-Type": "application/json",
+              "X-Ferry-Signature": sig,
+          })
+          try:
+              urllib.request.urlopen(req, timeout=10).read()
+          except Exception as exc:
+              print(f"Webhook start report failed: {exc}")
+          PY
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y aria2 jq
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+
+      - name: Configure rclone
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          rclone listremotes
+
+      - name: Download source
+        env:
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          mkdir -p out
+          aria2c \
+            --dir=out \
+            --seed-time=0 \
+            --max-connection-per-server=16 \
+            --split=16 \
+            --min-split-size=1M \
+            --bt-enable-lpd=true \
+            --bt-save-metadata=true \
+            --summary-interval=30 \
+            "$SOURCE_URL"
+
+      - name: Upload to Drive
+        env:
+          DRIVE_FOLDER: ${{ inputs.drive_folder }}
+        run: |
+          rclone mkdir "gdrive:${DRIVE_FOLDER}"
+          rclone move out "gdrive:${DRIVE_FOLDER}" \
+            --progress \
+            --transfers=4 \
+            --checkers=8 \
+            --drive-chunk-size=128M \
+            --delete-empty-src-dirs
+
+      - name: Report success
+        if: success()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          JOB_ID: ${{ inputs.job_id }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          DRIVE_FOLDER: ${{ inputs.drive_folder }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, hmac, json, os, urllib.parse, urllib.request
+          folder = urllib.parse.quote(os.environ["DRIVE_FOLDER"])
+          body = json.dumps({
+              "jobId": os.environ["JOB_ID"],
+              "status": "completed",
+              "driveLink": f"https://drive.google.com/drive/search?q={folder}",
+          }).encode()
+          sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
+              "Content-Type": "application/json",
+              "X-Ferry-Signature": sig,
+          })
+          urllib.request.urlopen(req, timeout=20).read()
+          PY
+
+      - name: Report failure
+        if: failure()
+        env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          JOB_ID: ${{ inputs.job_id }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, hmac, json, os, urllib.request
+          body = json.dumps({
+              "jobId": os.environ["JOB_ID"],
+              "status": "failed",
+              "errorMessage": "GitHub Actions runner failed. Check workflow logs.",
+          }).encode()
+          sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
+              "Content-Type": "application/json",
+              "X-Ferry-Signature": sig,
+          })
+          try:
+              urllib.request.urlopen(req, timeout=20).read()
+          except Exception as exc:
+              print(f"Webhook failure report failed: {exc}")
+          PY
