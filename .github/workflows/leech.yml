@@ -134,7 +134,7 @@ jobs:
 
           expected_total = expected_size(source_url)
 
-          def report(status, phase, downloaded=0, total=0, speed=0, error=None):
+          def report(status, phase, downloaded=0, total=0, speed=0, peers=0, seeders=0, error=None):
               body = {
                   "jobId": job_id,
                   "status": status,
@@ -143,6 +143,8 @@ jobs:
                   "downloadedBytes": int(downloaded or 0),
                   "totalBytes": int(total or 0),
                   "speedBytesPerSecond": int(speed or 0),
+                  "peerCount": int(peers or 0),
+                  "seederCount": int(seeders or 0),
               }
               if error:
                   body["errorMessage"] = error
@@ -217,10 +219,10 @@ jobs:
               source_url,
           ]
 
-          report("running", "downloading", 0, expected_total, 0)
+          report("running", "downloading", 0, expected_total, 0, 0, 0)
           process = subprocess.Popen(command)
           last_report = 0
-          downloaded = total = speed = 0
+          downloaded = total = speed = peers = seeders = 0
           try:
               while process.poll() is None:
                   time.sleep(5)
@@ -235,15 +237,17 @@ jobs:
                           if total <= 0:
                               total = expected_total
                           speed = sum(int(item.get("downloadSpeed", 0)) for item in active or [])
+                          peers = sum(int(item.get("connections", 0)) for item in active or [])
+                          seeders = sum(int(item.get("numSeeders", 0)) for item in active or [])
                       now = time.time()
                       if now - last_report >= 15:
-                          report("running", "downloading", downloaded, total, speed)
+                          report("running", "downloading", downloaded, total, speed, peers, seeders)
                           last_report = now
                   except Exception as exc:
                       print(f"Progress check failed: {exc}")
 
               status = process.wait()
-              report("running", "uploading", downloaded, total, 0)
+              report("running", "uploading", downloaded, total, 0, peers, seeders)
               if status != 0:
                   message = "Download failed or stalled. This usually means the torrent has no active seeders, no peers, or the source URL is unavailable."
                   print(message)
