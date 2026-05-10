@@ -98,6 +98,12 @@ jobs:
             --min-split-size=1M \
             --bt-enable-lpd=true \
             --bt-save-metadata=true \
+            --bt-max-peers=100 \
+            --enable-dht=true \
+            --enable-dht6=true \
+            --enable-peer-exchange=true \
+            --max-overall-download-limit=0 \
+            --max-download-limit=0 \
             --summary-interval=30 \
             --console-log-level=notice \
             --log=aria2.log \
@@ -124,9 +130,11 @@ jobs:
           rclone mkdir "gdrive:${DRIVE_FOLDER}"
           rclone move out "gdrive:${DRIVE_FOLDER}" \
             --progress \
-            --transfers=4 \
-            --checkers=8 \
-            --drive-chunk-size=128M \
+            --transfers=8 \
+            --checkers=16 \
+            --drive-chunk-size=256M \
+            --drive-upload-cutoff=256M \
+            --fast-list \
             --delete-empty-src-dirs
 
       - name: Report success
