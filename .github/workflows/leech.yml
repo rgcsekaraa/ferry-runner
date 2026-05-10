@@ -123,6 +123,17 @@ jobs:
                       seen.add(tracker)
               return ",".join(trackers)
 
+          def expected_size(value):
+              if not value.startswith("magnet:?"):
+                  return 0
+              params = urllib.parse.parse_qs(urllib.parse.urlparse(value).query)
+              try:
+                  return int(params.get("xl", ["0"])[0])
+              except Exception:
+                  return 0
+
+          expected_total = expected_size(source_url)
+
           def report(status, phase, downloaded=0, total=0, speed=0, error=None):
               body = {
                   "jobId": job_id,
@@ -206,7 +217,7 @@ jobs:
               source_url,
           ]
 
-          report("running", "downloading")
+          report("running", "downloading", 0, expected_total, 0)
           process = subprocess.Popen(command)
           last_report = 0
           downloaded = total = speed = 0
@@ -221,6 +232,8 @@ jobs:
                       if items:
                           downloaded = sum(int(item.get("completedLength", 0)) for item in items)
                           total = sum(int(item.get("totalLength", 0)) for item in items)
+                          if total <= 0:
+                              total = expected_total
                           speed = sum(int(item.get("downloadSpeed", 0)) for item in active or [])
                       now = time.time()
                       if now - last_report >= 15:
