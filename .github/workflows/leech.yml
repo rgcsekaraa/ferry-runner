@@ -222,6 +222,8 @@ jobs:
           report("running", "downloading", 0, expected_total, 0, 0, 0)
           process = subprocess.Popen(command)
           last_report = 0
+          no_seeders_since = None
+          no_seeders_timeout = 600
           downloaded = total = speed = peers = seeders = 0
           try:
               while process.poll() is None:
@@ -239,10 +241,29 @@ jobs:
                           speed = sum(int(item.get("downloadSpeed", 0)) for item in active or [])
                           peers = sum(int(item.get("connections", 0)) for item in active or [])
                           seeders = sum(int(item.get("numSeeders", 0)) for item in active or [])
+                          if total > 0 and downloaded == 0 and seeders == 0:
+                              no_seeders_since = no_seeders_since or time.time()
+                          else:
+                              no_seeders_since = None
                       now = time.time()
                       if now - last_report >= 15:
                           report("running", "downloading", downloaded, total, speed, peers, seeders)
                           last_report = now
+                      if no_seeders_since and now - no_seeders_since >= no_seeders_timeout:
+                          message = (
+                              f"No seeders detected for {no_seeders_timeout // 60} minutes. "
+                              f"Connected peers: {peers}. The torrent metadata is available, "
+                              "but no peer is advertising complete file pieces."
+                          )
+                          with open("ferry-error-message.txt", "w", encoding="utf-8") as error_file:
+                              error_file.write(message)
+                          report("failed", "failed", downloaded, total, speed, peers, seeders, message)
+                          process.terminate()
+                          try:
+                              process.wait(timeout=20)
+                          except subprocess.TimeoutExpired:
+                              process.kill()
+                          raise SystemExit(1)
                   except Exception as exc:
                       print(f"Progress check failed: {exc}")
 
@@ -338,11 +359,17 @@ jobs:
           python3 - <<'PY'
           import hashlib, hmac, json, os, urllib.request
           run_url = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['WORKFLOW_RUN_ID']}"
+          error_message = f"GitHub Actions runner failed. Check workflow logs: {run_url}"
+          try:
+              with open("ferry-error-message.txt", "r", encoding="utf-8") as error_file:
+                  error_message = error_file.read().strip() or error_message
+          except FileNotFoundError:
+              pass
           body = json.dumps({
               "jobId": os.environ["JOB_ID"],
               "status": "failed",
               "workflowRunId": os.environ["WORKFLOW_RUN_ID"],
-              "errorMessage": f"GitHub Actions runner failed. Check workflow logs: {run_url}",
+              "errorMessage": error_message,
           }, separators=(",", ":")).encode()
           sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
           req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
