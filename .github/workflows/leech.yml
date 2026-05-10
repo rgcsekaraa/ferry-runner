@@ -81,41 +81,128 @@ jobs:
       - name: Download source
         env:
           SOURCE_URL: ${{ inputs.source_url }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          JOB_ID: ${{ inputs.job_id }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
           mkdir -p out
-          set +e
-          aria2c \
-            --dir=out \
-            --seed-time=0 \
-            --bt-stop-timeout=900 \
-            --lowest-speed-limit=1K \
-            --timeout=60 \
-            --connect-timeout=30 \
-            --max-tries=3 \
-            --retry-wait=30 \
-            --max-connection-per-server=16 \
-            --split=16 \
-            --min-split-size=1M \
-            --bt-enable-lpd=true \
-            --bt-save-metadata=true \
-            --bt-max-peers=100 \
-            --enable-dht=true \
-            --enable-dht6=true \
-            --enable-peer-exchange=true \
-            --max-overall-download-limit=0 \
-            --max-download-limit=0 \
-            --summary-interval=30 \
-            --console-log-level=notice \
-            --log=aria2.log \
-            --log-level=notice \
-            "$SOURCE_URL"
-          status=$?
-          set -e
-          if [ "$status" -ne 0 ]; then
-            echo "Download failed or stalled. This usually means the torrent has no active seeders, no peers, or the source URL is unavailable."
-            tail -n 120 aria2.log || true
-            exit "$status"
-          fi
+          python3 - <<'PY'
+          import hashlib, hmac, json, os, secrets, subprocess, time, urllib.request
+
+          callback_url = os.environ["CALLBACK_URL"]
+          job_id = os.environ["JOB_ID"]
+          webhook_secret = os.environ["WEBHOOK_SECRET"].encode()
+          workflow_run_id = os.environ["WORKFLOW_RUN_ID"]
+          rpc_secret = secrets.token_urlsafe(24)
+
+          def report(status, phase, downloaded=0, total=0, speed=0, error=None):
+              body = {
+                  "jobId": job_id,
+                  "status": status,
+                  "workflowRunId": workflow_run_id,
+                  "progressPhase": phase,
+                  "downloadedBytes": int(downloaded or 0),
+                  "totalBytes": int(total or 0),
+                  "speedBytesPerSecond": int(speed or 0),
+              }
+              if error:
+                  body["errorMessage"] = error
+              data = json.dumps(body, separators=(",", ":")).encode()
+              sig = "sha256=" + hmac.new(webhook_secret, data, hashlib.sha256).hexdigest()
+              req = urllib.request.Request(callback_url, data=data, method="POST", headers={
+                  "Content-Type": "application/json",
+                  "X-Ferry-Signature": sig,
+              })
+              try:
+                  urllib.request.urlopen(req, timeout=10).read()
+              except Exception as exc:
+                  print(f"Progress webhook failed: {exc}")
+
+          def rpc(method, params=None):
+              payload = json.dumps({
+                  "jsonrpc": "2.0",
+                  "id": "ferry",
+                  "method": method,
+                  "params": [f"token:{rpc_secret}", *(params or [])],
+              }).encode()
+              req = urllib.request.Request("http://127.0.0.1:6800/jsonrpc", data=payload, method="POST", headers={
+                  "Content-Type": "application/json",
+              })
+              with urllib.request.urlopen(req, timeout=10) as response:
+                  result = json.loads(response.read().decode())
+              if "error" in result:
+                  raise RuntimeError(result["error"])
+              return result.get("result")
+
+          command = [
+              "aria2c",
+              "--dir=out",
+              "--seed-time=0",
+              "--bt-stop-timeout=900",
+              "--lowest-speed-limit=1K",
+              "--timeout=60",
+              "--connect-timeout=30",
+              "--max-tries=3",
+              "--retry-wait=30",
+              "--max-connection-per-server=16",
+              "--split=16",
+              "--min-split-size=1M",
+              "--bt-enable-lpd=true",
+              "--bt-save-metadata=true",
+              "--bt-max-peers=100",
+              "--enable-dht=true",
+              "--enable-dht6=true",
+              "--enable-peer-exchange=true",
+              "--max-overall-download-limit=0",
+              "--max-download-limit=0",
+              "--summary-interval=30",
+              "--console-log-level=notice",
+              "--log=aria2.log",
+              "--log-level=notice",
+              "--enable-rpc=true",
+              "--rpc-listen-all=false",
+              "--rpc-listen-port=6800",
+              f"--rpc-secret={rpc_secret}",
+              os.environ["SOURCE_URL"],
+          ]
+
+          report("running", "downloading")
+          process = subprocess.Popen(command)
+          last_report = 0
+          downloaded = total = speed = 0
+          try:
+              while process.poll() is None:
+                  time.sleep(5)
+                  try:
+                      active = rpc("aria2.tellActive")
+                      waiting = rpc("aria2.tellWaiting", [0, 10])
+                      stopped = rpc("aria2.tellStopped", [0, 10])
+                      items = list(active or []) + list(waiting or []) + list(stopped or [])
+                      if items:
+                          downloaded = sum(int(item.get("completedLength", 0)) for item in items)
+                          total = sum(int(item.get("totalLength", 0)) for item in items)
+                          speed = sum(int(item.get("downloadSpeed", 0)) for item in active or [])
+                      now = time.time()
+                      if now - last_report >= 15:
+                          report("running", "downloading", downloaded, total, speed)
+                          last_report = now
+                  except Exception as exc:
+                      print(f"Progress check failed: {exc}")
+
+              status = process.wait()
+              report("running", "uploading", downloaded, total, 0)
+              if status != 0:
+                  message = "Download failed or stalled. This usually means the torrent has no active seeders, no peers, or the source URL is unavailable."
+                  print(message)
+                  subprocess.run(["tail", "-n", "120", "aria2.log"], check=False)
+                  raise SystemExit(status)
+          finally:
+              try:
+                  rpc("aria2.shutdown")
+              except Exception:
+                  pass
+          PY
 
       - name: Build upload manifest
         run: |
