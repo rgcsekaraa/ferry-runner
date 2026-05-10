@@ -87,14 +87,41 @@ jobs:
           WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
           mkdir -p out
+          mkdir -p ~/.cache/aria2
           python3 - <<'PY'
-          import hashlib, hmac, json, os, secrets, subprocess, time, urllib.request
+          import hashlib, hmac, json, os, secrets, subprocess, time, urllib.parse, urllib.request
 
           callback_url = os.environ["CALLBACK_URL"]
           job_id = os.environ["JOB_ID"]
           webhook_secret = os.environ["WEBHOOK_SECRET"].encode()
           workflow_run_id = os.environ["WORKFLOW_RUN_ID"]
           rpc_secret = secrets.token_urlsafe(24)
+          source_url = os.environ["SOURCE_URL"]
+          extra_trackers = [
+              "udp://tracker.opentrackr.org:1337/announce",
+              "udp://open.stealth.si:80/announce",
+              "udp://tracker.torrent.eu.org:451/announce",
+              "udp://tracker.dler.org:6969/announce",
+              "udp://open.demonii.com:1337/announce",
+              "udp://exodus.desync.com:6969/announce",
+              "udp://tracker-udp.gbitt.info:80/announce",
+              "udp://opentracker.i2p.rocks:6969/announce",
+              "https://tracker.tamersunion.org:443/announce",
+              "https://tracker.gbitt.info:443/announce",
+          ]
+
+          def merged_trackers(value):
+              if not value.startswith("magnet:?"):
+                  return ",".join(extra_trackers)
+              params = urllib.parse.parse_qs(urllib.parse.urlparse(value).query)
+              existing = [item for values in params.get("tr", []) for item in values.splitlines()]
+              trackers = []
+              seen = set()
+              for tracker in [*existing, *extra_trackers]:
+                  if tracker and tracker not in seen:
+                      trackers.append(tracker)
+                      seen.add(tracker)
+              return ",".join(trackers)
 
           def report(status, phase, downloaded=0, total=0, speed=0, error=None):
               body = {
@@ -139,21 +166,33 @@ jobs:
               "aria2c",
               "--dir=out",
               "--seed-time=0",
-              "--bt-stop-timeout=900",
+              "--bt-stop-timeout=1800",
               "--lowest-speed-limit=1K",
               "--timeout=60",
               "--connect-timeout=30",
-              "--max-tries=3",
-              "--retry-wait=30",
+              "--max-tries=5",
+              "--retry-wait=20",
               "--max-connection-per-server=16",
+              "--max-concurrent-downloads=1",
               "--split=16",
               "--min-split-size=1M",
               "--bt-enable-lpd=true",
               "--bt-save-metadata=true",
-              "--bt-max-peers=100",
+              "--bt-load-saved-metadata=true",
+              "--bt-max-peers=200",
+              "--bt-tracker-connect-timeout=30",
+              "--bt-tracker-timeout=60",
+              "--bt-request-peer-speed-limit=0",
+              f"--bt-tracker={merged_trackers(source_url)}",
               "--enable-dht=true",
               "--enable-dht6=true",
               "--enable-peer-exchange=true",
+              "--dht-listen-port=6881-6999",
+              "--listen-port=6881-6999",
+              "--follow-torrent=mem",
+              "--file-allocation=falloc",
+              "--disk-cache=128M",
+              "--enable-mmap=true",
               "--max-overall-download-limit=0",
               "--max-download-limit=0",
               "--summary-interval=30",
@@ -164,7 +203,7 @@ jobs:
               "--rpc-listen-all=false",
               "--rpc-listen-port=6800",
               f"--rpc-secret={rpc_secret}",
-              os.environ["SOURCE_URL"],
+              source_url,
           ]
 
           report("running", "downloading")
