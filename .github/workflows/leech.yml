@@ -1,4 +1,5 @@
 name: Leech to Drive
+run-name: Ferry transfer ${{ inputs.job_id }}
 
 on:
   workflow_dispatch:
@@ -30,15 +31,28 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Validate runner secrets
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          test -n "$RCLONE_CONF" || (echo "RCLONE_CONF secret is missing." && exit 1)
+          test -n "$WEBHOOK_SECRET" || (echo "WEBHOOK_SECRET secret is missing." && exit 1)
+
       - name: Report started
         env:
           CALLBACK_URL: ${{ inputs.callback_url }}
           JOB_ID: ${{ inputs.job_id }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
           python3 - <<'PY'
           import hashlib, hmac, json, os, urllib.request
-          body = json.dumps({"jobId": os.environ["JOB_ID"], "status": "running"}).encode()
+          body = json.dumps({
+              "jobId": os.environ["JOB_ID"],
+              "status": "running",
+              "workflowRunId": os.environ["WORKFLOW_RUN_ID"],
+          }, separators=(",", ":")).encode()
           sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
           req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
               "Content-Type": "application/json",
@@ -69,16 +83,39 @@ jobs:
           SOURCE_URL: ${{ inputs.source_url }}
         run: |
           mkdir -p out
+          set +e
           aria2c \
             --dir=out \
             --seed-time=0 \
+            --bt-stop-timeout=900 \
+            --lowest-speed-limit=1K \
+            --timeout=60 \
+            --connect-timeout=30 \
+            --max-tries=3 \
+            --retry-wait=30 \
             --max-connection-per-server=16 \
             --split=16 \
             --min-split-size=1M \
             --bt-enable-lpd=true \
             --bt-save-metadata=true \
             --summary-interval=30 \
+            --console-log-level=notice \
+            --log=aria2.log \
+            --log-level=notice \
             "$SOURCE_URL"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "Download failed or stalled. This usually means the torrent has no active seeders, no peers, or the source URL is unavailable."
+            tail -n 120 aria2.log || true
+            exit "$status"
+          fi
+
+      - name: Build upload manifest
+        run: |
+          find out -type f -printf '%P\n' | sort > upload-manifest.txt
+          test -s upload-manifest.txt || (echo "Download produced no files." && exit 1)
+          cat upload-manifest.txt
 
       - name: Upload to Drive
         env:
@@ -99,15 +136,37 @@ jobs:
           JOB_ID: ${{ inputs.job_id }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           DRIVE_FOLDER: ${{ inputs.drive_folder }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
           python3 - <<'PY'
-          import hashlib, hmac, json, os, urllib.parse, urllib.request
-          folder = urllib.parse.quote(os.environ["DRIVE_FOLDER"])
+          import hashlib, hmac, json, os, subprocess, urllib.parse, urllib.request
+
+          drive_folder = os.environ["DRIVE_FOLDER"]
+          with open("upload-manifest.txt", "r", encoding="utf-8") as manifest:
+              first_file = next((line.strip() for line in manifest if line.strip()), "")
+
+          fallback = f"https://drive.google.com/drive/search?q={urllib.parse.quote(drive_folder)}"
+          drive_link = fallback
+          if first_file:
+              remote_path = f"gdrive:{drive_folder}/{first_file}"
+              try:
+                  link = subprocess.check_output(
+                      ["rclone", "link", remote_path],
+                      text=True,
+                      stderr=subprocess.STDOUT,
+                      timeout=30,
+                  ).strip()
+                  if link:
+                      drive_link = link
+              except Exception as exc:
+                  print(f"Unable to create direct Drive link for {remote_path}: {exc}")
+
           body = json.dumps({
               "jobId": os.environ["JOB_ID"],
               "status": "completed",
-              "driveLink": f"https://drive.google.com/drive/search?q={folder}",
-          }).encode()
+              "driveLink": drive_link,
+              "workflowRunId": os.environ["WORKFLOW_RUN_ID"],
+          }, separators=(",", ":")).encode()
           sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
           req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
               "Content-Type": "application/json",
@@ -122,14 +181,18 @@ jobs:
           CALLBACK_URL: ${{ inputs.callback_url }}
           JOB_ID: ${{ inputs.job_id }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           python3 - <<'PY'
           import hashlib, hmac, json, os, urllib.request
+          run_url = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['WORKFLOW_RUN_ID']}"
           body = json.dumps({
               "jobId": os.environ["JOB_ID"],
               "status": "failed",
-              "errorMessage": "GitHub Actions runner failed. Check workflow logs.",
-          }).encode()
+              "workflowRunId": os.environ["WORKFLOW_RUN_ID"],
+              "errorMessage": f"GitHub Actions runner failed. Check workflow logs: {run_url}",
+          }, separators=(",", ":")).encode()
           sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
           req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
               "Content-Type": "application/json",
