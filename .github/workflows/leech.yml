@@ -292,6 +292,12 @@ jobs:
                       if os.path.exists("aria2-http.log"):
                           subprocess.run(["tail", "-n", "120", "aria2-http.log"], check=False)
                       raise SystemExit(status)
+                  print(
+                      "Ferry HTTP download complete: "
+                      f"{format_bytes(downloaded)} / {format_bytes(total)}",
+                      flush=True,
+                  )
+                  print("Ferry upload starting", flush=True)
                   report("running", "uploading", downloaded, total, int(downloaded / elapsed))
               finally:
                   try:
