@@ -241,6 +241,7 @@ jobs:
                   "--timeout=60",
                   "--connect-timeout=30",
                   "--lowest-speed-limit=1K",
+                  "--disable-ipv6=true",
                   "--summary-interval=0",
                   "--console-log-level=error",
                   "--log=aria2-http.log",
