@@ -86,7 +86,7 @@ jobs:
         run: |
           mkdir -p out
           python3 - <<'PY'
-          import hashlib, hmac, json, os, subprocess, time, urllib.error, urllib.parse, urllib.request
+          import hashlib, hmac, json, os, re, subprocess, time, urllib.error, urllib.parse, urllib.request
 
           callback_url = os.environ["CALLBACK_URL"]
           job_id = os.environ["JOB_ID"]
@@ -147,6 +147,9 @@ jobs:
 
           expected_total = expected_size(source_url)
 
+          def is_http_source(value):
+              return value.startswith("http://") or value.startswith("https://")
+
           def format_bytes(value):
               value = float(value or 0)
               for unit in ["B", "KiB", "MiB", "GiB", "TiB"]:
@@ -179,6 +182,53 @@ jobs:
                   urllib.request.urlopen(req, timeout=10).read()
               except Exception as exc:
                   print(f"Progress webhook failed: {exc}")
+
+          def output_name_from_response(url, response):
+              disposition = response.headers.get("content-disposition") or ""
+              match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', disposition, re.I)
+              if match:
+                  return urllib.parse.unquote(match.group(1)).strip() or "download.bin"
+              path_name = urllib.parse.urlparse(response.url or url).path.rstrip("/").split("/")[-1]
+              return urllib.parse.unquote(path_name) or "download.bin"
+
+          def safe_output_path(name):
+              safe_name = name.replace("/", "_").replace("\\", "_").strip()
+              return os.path.join("out", safe_name or "download.bin")
+
+          def download_http_source(url):
+              request = urllib.request.Request(url, headers={"User-Agent": "Ferry-Runner/1.0"})
+              report("running", "downloading", 0, 0, 0)
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  total = int(response.headers.get("content-length") or 0)
+                  output_path = safe_output_path(output_name_from_response(url, response))
+                  downloaded = 0
+                  started_at = time.time()
+                  last_report = started_at
+                  with open(output_path, "wb") as output_file:
+                      while True:
+                          chunk = response.read(1024 * 1024)
+                          if not chunk:
+                              break
+                          output_file.write(chunk)
+                          downloaded += len(chunk)
+                          now = time.time()
+                          if now - last_report >= 5:
+                              elapsed = max(now - started_at, 0.001)
+                              speed = int(downloaded / elapsed)
+                              report("running", "downloading", downloaded, total, speed)
+                              print(
+                                  "Ferry HTTP progress: "
+                                  f"{format_bytes(downloaded)} / {format_bytes(total)} "
+                                  f"{format_bytes(speed)}/s",
+                                  flush=True,
+                              )
+                              last_report = now
+                  elapsed = max(time.time() - started_at, 0.001)
+                  report("running", "uploading", downloaded, total, int(downloaded / elapsed))
+
+          if is_http_source(source_url):
+              download_http_source(source_url)
+              raise SystemExit(0)
 
           def transmission_rpc(method, arguments=None):
               global session_id
