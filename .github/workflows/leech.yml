@@ -29,10 +29,16 @@ on:
 
 permissions:
   contents: read
+  packages: read
 
 jobs:
   leech:
     runs-on: ${{ inputs.runner_label || vars.FERRY_RUNNER_LABEL || 'ubuntu-latest' }}
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/ferry-runner-tools:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 360
 
     steps:
@@ -69,26 +75,6 @@ jobs:
           except Exception as exc:
               print(f"Webhook start report failed: {exc}")
           PY
-
-      - name: Restore torrent session cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.config/transmission-daemon
-            ~/.cache/transmission
-          key: ferry-transmission-session-${{ runner.os }}-${{ github.repository_id }}-${{ github.run_id }}
-          restore-keys: |
-            ferry-transmission-session-${{ runner.os }}-${{ github.repository_id }}-
-
-      - name: Install torrent engine
-        run: |
-          if ! command -v transmission-daemon >/dev/null 2>&1; then
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends transmission-daemon || {
-              sudo apt-get update -qq
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends transmission-daemon
-            }
-          fi
-          transmission-daemon --version
 
       - name: Download source
         env:
@@ -368,24 +354,6 @@ jobs:
           find out -type f -printf '%P\n' | sort > upload-manifest.txt
           test -s upload-manifest.txt || (echo "Download produced no files." && exit 1)
           cat upload-manifest.txt
-
-      - name: Restore rclone binary cache
-        id: rclone-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/bin/rclone
-          key: ferry-rclone-v1.74.1-linux-amd64
-
-      - name: Install rclone
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          if [ ! -x "$HOME/.local/bin/rclone" ]; then
-            curl -fsSLO https://downloads.rclone.org/v1.74.1/rclone-v1.74.1-linux-amd64.zip
-            unzip -q rclone-v1.74.1-linux-amd64.zip
-            install -m 755 rclone-v1.74.1-linux-amd64/rclone "$HOME/.local/bin/rclone"
-          fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/rclone" version
 
       - name: Configure rclone
         env:
