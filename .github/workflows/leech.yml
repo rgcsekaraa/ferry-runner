@@ -257,6 +257,7 @@ jobs:
               process = subprocess.Popen(command)
               started_at = time.time()
               last_report = 0
+              finalizing_reported_at = 0
               downloaded = total = speed = 0
               try:
                   while process.poll() is None:
@@ -270,8 +271,12 @@ jobs:
                               downloaded = sum(int(item.get("completedLength", 0)) for item in items)
                               total = sum(int(item.get("totalLength", 0)) for item in items)
                               speed = sum(int(item.get("downloadSpeed", 0)) for item in active or [])
+                          stopped_complete = any(
+                              item.get("status") == "complete" for item in stopped or []
+                          )
                           now = time.time()
-                          if now - last_report >= 5 and not (total > 0 and downloaded >= total):
+                          is_complete_by_size = total > 0 and downloaded >= total
+                          if now - last_report >= 5 and not is_complete_by_size:
                               report("running", "downloading", downloaded, total, speed)
                               print(
                                   "Ferry HTTP progress: "
@@ -280,6 +285,26 @@ jobs:
                                   flush=True,
                               )
                               last_report = now
+                          if is_complete_by_size and now - finalizing_reported_at >= 5:
+                              print(
+                                  "Ferry HTTP finalizing: "
+                                  f"{format_bytes(downloaded)} / {format_bytes(total)}",
+                                  flush=True,
+                              )
+                              report("running", "downloading", downloaded, total, 0)
+                              finalizing_reported_at = now
+                          if stopped_complete:
+                              print("Ferry HTTP transfer marked complete by aria2", flush=True)
+                              try:
+                                  aria2_rpc("aria2.shutdown")
+                              except Exception:
+                                  pass
+                              try:
+                                  process.wait(timeout=20)
+                              except subprocess.TimeoutExpired:
+                                  process.terminate()
+                                  process.wait(timeout=20)
+                              break
                       except Exception as exc:
                           print(f"HTTP progress check failed: {exc}")
 
