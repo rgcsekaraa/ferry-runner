@@ -80,59 +80,15 @@ jobs:
           restore-keys: |
             ferry-transmission-session-${{ runner.os }}-${{ github.repository_id }}-
 
-      - name: Restore rclone binary cache
-        id: rclone-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.local/bin/rclone
-          key: ferry-rclone-v1.74.1-linux-amd64
-
-      - name: Install tools
+      - name: Install torrent engine
         run: |
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            ca-certificates \
-            curl \
-            jq \
-            transmission-daemon \
-            unzip
-
-          mkdir -p "$HOME/.local/bin"
-          if [ ! -x "$HOME/.local/bin/rclone" ]; then
-            curl -fsSLO https://downloads.rclone.org/v1.74.1/rclone-v1.74.1-linux-amd64.zip
-            unzip -q rclone-v1.74.1-linux-amd64.zip
-            install -m 755 rclone-v1.74.1-linux-amd64/rclone "$HOME/.local/bin/rclone"
+          if ! command -v transmission-daemon >/dev/null 2>&1; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends transmission-daemon || {
+              sudo apt-get update -qq
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends transmission-daemon
+            }
           fi
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/rclone" version
-
-      - name: Configure rclone
-        env:
-          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
-        run: |
-          mkdir -p ~/.config/rclone
-          printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
-          rclone listremotes
-
-      - name: Measure runner network baseline
-        run: |
-          python3 - <<'PY'
-          import time, urllib.request
-
-          url = "https://speed.cloudflare.com/__down?bytes=100000000"
-          start = time.time()
-          bytes_read = 0
-          req = urllib.request.Request(url, headers={"User-Agent": "Ferry-Runner/1.0"})
-          with urllib.request.urlopen(req, timeout=60) as response:
-              while True:
-                  chunk = response.read(1024 * 1024)
-                  if not chunk:
-                      break
-                  bytes_read += len(chunk)
-          elapsed = max(time.time() - start, 0.001)
-          mibps = bytes_read / 1024 / 1024 / elapsed
-          print(f"Ferry network baseline: {mibps:.1f} MiB/s over HTTPS")
-          PY
+          transmission-daemon --version
 
       - name: Download source
         env:
@@ -412,6 +368,32 @@ jobs:
           find out -type f -printf '%P\n' | sort > upload-manifest.txt
           test -s upload-manifest.txt || (echo "Download produced no files." && exit 1)
           cat upload-manifest.txt
+
+      - name: Restore rclone binary cache
+        id: rclone-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/rclone
+          key: ferry-rclone-v1.74.1-linux-amd64
+
+      - name: Install rclone
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          if [ ! -x "$HOME/.local/bin/rclone" ]; then
+            curl -fsSLO https://downloads.rclone.org/v1.74.1/rclone-v1.74.1-linux-amd64.zip
+            unzip -q rclone-v1.74.1-linux-amd64.zip
+            install -m 755 rclone-v1.74.1-linux-amd64/rclone "$HOME/.local/bin/rclone"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/rclone" version
+
+      - name: Configure rclone
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+        run: |
+          mkdir -p ~/.config/rclone
+          printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          rclone listremotes
 
       - name: Upload to Drive
         env:
