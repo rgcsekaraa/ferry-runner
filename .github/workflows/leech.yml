@@ -56,6 +56,7 @@ jobs:
           sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
           req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
               "Content-Type": "application/json",
+              "User-Agent": "Ferry-Runner/1.0",
               "X-Ferry-Signature": sig,
           })
           try:
@@ -192,6 +193,7 @@ jobs:
               sig = "sha256=" + hmac.new(webhook_secret, data, hashlib.sha256).hexdigest()
               req = urllib.request.Request(callback_url, data=data, method="POST", headers={
                   "Content-Type": "application/json",
+                  "User-Agent": "Ferry-Runner/1.0",
                   "X-Ferry-Signature": sig,
               })
               try:
@@ -429,6 +431,7 @@ jobs:
           sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
           req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
               "Content-Type": "application/json",
+              "User-Agent": "Ferry-Runner/1.0",
               "X-Ferry-Signature": sig,
           })
           urllib.request.urlopen(req, timeout=20).read()
@@ -461,6 +464,7 @@ jobs:
           sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
           req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
               "Content-Type": "application/json",
+              "User-Agent": "Ferry-Runner/1.0",
               "X-Ferry-Signature": sig,
           })
           try:
