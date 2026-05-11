@@ -64,10 +64,20 @@ jobs:
               print(f"Webhook start report failed: {exc}")
           PY
 
+      - name: Restore torrent session cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.config/transmission-daemon
+            ~/.cache/transmission
+          key: ferry-transmission-session-${{ runner.os }}-${{ github.repository_id }}-${{ github.run_id }}
+          restore-keys: |
+            ferry-transmission-session-${{ runner.os }}-${{ github.repository_id }}-
+
       - name: Install tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y aria2 jq
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq transmission-daemon
           curl -fsSL https://rclone.org/install.sh | sudo bash
 
       - name: Configure rclone
@@ -87,15 +97,17 @@ jobs:
           WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
           mkdir -p out
-          mkdir -p ~/.cache/aria2
           python3 - <<'PY'
-          import hashlib, hmac, json, os, secrets, subprocess, time, urllib.parse, urllib.request
+          import hashlib, hmac, json, os, secrets, subprocess, time, urllib.error, urllib.parse, urllib.request
 
           callback_url = os.environ["CALLBACK_URL"]
           job_id = os.environ["JOB_ID"]
           webhook_secret = os.environ["WEBHOOK_SECRET"].encode()
           workflow_run_id = os.environ["WORKFLOW_RUN_ID"]
-          rpc_secret = secrets.token_urlsafe(24)
+          rpc_user = "ferry"
+          rpc_password = secrets.token_urlsafe(24)
+          rpc_url = "http://127.0.0.1:9091/transmission/rpc"
+          session_id = ""
           source_url = os.environ["SOURCE_URL"]
           extra_trackers = [
               "udp://tracker.opentrackr.org:1337/announce",
@@ -110,18 +122,17 @@ jobs:
               "https://tracker.gbitt.info:443/announce",
           ]
 
-          def merged_trackers(value):
+          def source_with_extra_trackers(value):
               if not value.startswith("magnet:?"):
-                  return ",".join(extra_trackers)
-              params = urllib.parse.parse_qs(urllib.parse.urlparse(value).query)
-              existing = [item for values in params.get("tr", []) for item in values.splitlines()]
-              trackers = []
-              seen = set()
-              for tracker in [*existing, *extra_trackers]:
-                  if tracker and tracker not in seen:
-                      trackers.append(tracker)
-                      seen.add(tracker)
-              return ",".join(trackers)
+                  return value
+              parsed = urllib.parse.urlparse(value)
+              params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+              existing = {tracker for key, tracker in params if key == "tr"}
+              for tracker in extra_trackers:
+                  if tracker not in existing:
+                      params.append(("tr", tracker))
+                      existing.add(tracker)
+              return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(params)))
 
           def expected_size(value):
               if not value.startswith("magnet:?"):
@@ -159,126 +170,158 @@ jobs:
               except Exception as exc:
                   print(f"Progress webhook failed: {exc}")
 
-          def rpc(method, params=None):
+          def transmission_rpc(method, arguments=None):
+              global session_id
               payload = json.dumps({
-                  "jsonrpc": "2.0",
-                  "id": "ferry",
                   "method": method,
-                  "params": [f"token:{rpc_secret}", *(params or [])],
+                  "arguments": arguments or {},
               }).encode()
-              req = urllib.request.Request("http://127.0.0.1:6800/jsonrpc", data=payload, method="POST", headers={
+              headers = {
                   "Content-Type": "application/json",
-              })
-              with urllib.request.urlopen(req, timeout=10) as response:
-                  result = json.loads(response.read().decode())
-              if "error" in result:
-                  raise RuntimeError(result["error"])
-              return result.get("result")
+                  "X-Transmission-Session-Id": session_id,
+              }
+              password_manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+              password_manager.add_password(None, rpc_url, rpc_user, rpc_password)
+              opener = urllib.request.build_opener(
+                  urllib.request.HTTPBasicAuthHandler(password_manager)
+              )
+              req = urllib.request.Request(rpc_url, data=payload, method="POST", headers=headers)
+              try:
+                  with opener.open(req, timeout=15) as response:
+                      result = json.loads(response.read().decode())
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 409:
+                      session_id = exc.headers["X-Transmission-Session-Id"]
+                      return transmission_rpc(method, arguments)
+                  raise
+              if result.get("result") != "success":
+                  raise RuntimeError(result.get("result", "Transmission RPC failed"))
+              return result.get("arguments", {})
 
-          command = [
-              "aria2c",
-              "--dir=out",
-              "--seed-time=0",
-              "--bt-stop-timeout=1800",
-              "--lowest-speed-limit=1K",
-              "--timeout=60",
-              "--connect-timeout=30",
-              "--max-tries=5",
-              "--retry-wait=20",
-              "--max-connection-per-server=16",
-              "--max-concurrent-downloads=1",
-              "--split=16",
-              "--min-split-size=1M",
-              "--bt-enable-lpd=true",
-              "--bt-save-metadata=true",
-              "--bt-load-saved-metadata=true",
-              "--bt-max-peers=200",
-              "--bt-tracker-connect-timeout=30",
-              "--bt-tracker-timeout=60",
-              "--bt-request-peer-speed-limit=0",
-              f"--bt-tracker={merged_trackers(source_url)}",
-              "--enable-dht=true",
-              "--enable-dht6=true",
-              "--enable-peer-exchange=true",
-              "--dht-listen-port=6881-6999",
-              "--listen-port=6881-6999",
-              "--follow-torrent=mem",
-              "--file-allocation=falloc",
-              "--disk-cache=128M",
-              "--enable-mmap=true",
-              "--max-overall-download-limit=0",
-              "--max-download-limit=0",
-              "--summary-interval=30",
-              "--console-log-level=notice",
-              "--log=aria2.log",
-              "--log-level=notice",
-              "--enable-rpc=true",
-              "--rpc-listen-all=false",
-              "--rpc-listen-port=6800",
-              f"--rpc-secret={rpc_secret}",
-              source_url,
-          ]
+          settings_dir = os.path.expanduser("~/.config/transmission-daemon")
+          os.makedirs(settings_dir, exist_ok=True)
+          settings_path = os.path.join(settings_dir, "settings.json")
+          settings = {
+              "download-dir": os.path.abspath("out"),
+              "incomplete-dir-enabled": False,
+              "rpc-authentication-required": True,
+              "rpc-bind-address": "127.0.0.1",
+              "rpc-enabled": True,
+              "rpc-password": rpc_password,
+              "rpc-port": 9091,
+              "rpc-username": rpc_user,
+              "rpc-whitelist-enabled": False,
+              "dht-enabled": True,
+              "pex-enabled": True,
+              "lpd-enabled": True,
+              "utp-enabled": True,
+              "peer-port": 51413,
+              "peer-port-random-on-start": False,
+              "peer-limit-global": 500,
+              "peer-limit-per-torrent": 240,
+              "download-queue-enabled": False,
+              "speed-limit-down-enabled": False,
+              "speed-limit-up-enabled": True,
+              "speed-limit-up": 1,
+              "ratio-limit-enabled": True,
+              "ratio-limit": 0,
+          }
+          with open(settings_path, "w", encoding="utf-8") as settings_file:
+              json.dump(settings, settings_file)
 
-          report("running", "downloading", 0, expected_total, 0, 0, 0)
-          process = subprocess.Popen(command)
-          last_report = 0
-          no_seeders_since = None
-          no_seeders_timeout = 600
-          downloaded = total = speed = peers = seeders = 0
+          daemon = subprocess.Popen(
+              ["transmission-daemon", "--foreground", "--config-dir", settings_dir],
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.STDOUT,
+          )
+          time.sleep(4)
+
+          downloaded = 0
+          total = expected_total
+          speed = peers = seeders = 0
           try:
-              while process.poll() is None:
-                  time.sleep(5)
-                  try:
-                      active = rpc("aria2.tellActive")
-                      waiting = rpc("aria2.tellWaiting", [0, 10])
-                      stopped = rpc("aria2.tellStopped", [0, 10])
-                      items = list(active or []) + list(waiting or []) + list(stopped or [])
-                      if items:
-                          downloaded = sum(int(item.get("completedLength", 0)) for item in items)
-                          total = sum(int(item.get("totalLength", 0)) for item in items)
-                          if total <= 0:
-                              total = expected_total
-                          speed = sum(int(item.get("downloadSpeed", 0)) for item in active or [])
-                          peers = sum(int(item.get("connections", 0)) for item in active or [])
-                          seeders = sum(int(item.get("numSeeders", 0)) for item in active or [])
-                          if total > 0 and downloaded == 0 and seeders == 0:
-                              no_seeders_since = no_seeders_since or time.time()
-                          else:
-                              no_seeders_since = None
-                      now = time.time()
-                      if now - last_report >= 15:
-                          report("running", "downloading", downloaded, total, speed, peers, seeders)
-                          last_report = now
-                      if no_seeders_since and now - no_seeders_since >= no_seeders_timeout:
-                          message = (
-                              f"No seeders detected for {no_seeders_timeout // 60} minutes. "
-                              f"Connected peers: {peers}. The torrent metadata is available, "
-                              "but no peer is advertising complete file pieces."
-                          )
-                          with open("ferry-error-message.txt", "w", encoding="utf-8") as error_file:
-                              error_file.write(message)
-                          report("failed", "failed", downloaded, total, speed, peers, seeders, message)
-                          process.terminate()
-                          try:
-                              process.wait(timeout=20)
-                          except subprocess.TimeoutExpired:
-                              process.kill()
-                          raise SystemExit(1)
-                  except Exception as exc:
-                      print(f"Progress check failed: {exc}")
+              added = transmission_rpc("torrent-add", {
+                  "filename": source_with_extra_trackers(source_url),
+                  "download-dir": os.path.abspath("out"),
+                  "paused": False,
+              })
+              torrent = added.get("torrent-added") or added.get("torrent-duplicate")
+              if not torrent:
+                  raise RuntimeError("Transmission did not accept the source.")
+              torrent_id = torrent["id"]
 
-              status = process.wait()
+              report("running", "downloading", 0, expected_total, 0, 0, 0)
+              last_report = 0
+              no_progress_since = None
+              no_progress_timeout = 1800
+
+              while True:
+                  time.sleep(5)
+                  response = transmission_rpc("torrent-get", {
+                      "ids": [torrent_id],
+                      "fields": [
+                          "id",
+                          "status",
+                          "error",
+                          "errorString",
+                          "percentDone",
+                          "totalSize",
+                          "haveValid",
+                          "haveUnchecked",
+                          "rateDownload",
+                          "peersConnected",
+                          "peersGettingFromUs",
+                          "peersSendingToUs",
+                      ],
+                  })
+                  torrents = response.get("torrents", [])
+                  if not torrents:
+                      raise RuntimeError("Transmission lost the torrent.")
+                  item = torrents[0]
+                  downloaded = int(item.get("haveValid", 0)) + int(item.get("haveUnchecked", 0))
+                  total = int(item.get("totalSize", 0)) or expected_total
+                  speed = int(item.get("rateDownload", 0))
+                  peers = int(item.get("peersConnected", 0))
+                  seeders = int(item.get("peersSendingToUs", 0))
+                  percent_done = float(item.get("percentDone", 0))
+                  error_code = int(item.get("error", 0))
+                  if error_code:
+                      raise RuntimeError(item.get("errorString") or "Transmission reported an error.")
+
+                  now = time.time()
+                  if now - last_report >= 15:
+                      report("running", "downloading", downloaded, total, speed, peers, seeders)
+                      last_report = now
+
+                  if percent_done >= 1:
+                      break
+
+                  if downloaded == 0 and speed == 0:
+                      no_progress_since = no_progress_since or now
+                  else:
+                      no_progress_since = None
+
+                  if no_progress_since and now - no_progress_since >= no_progress_timeout:
+                      message = (
+                          f"Transmission could not download file pieces for {no_progress_timeout // 60} minutes. "
+                          f"Connected peers: {peers}; peers sending data: {seeders}."
+                      )
+                      with open("ferry-error-message.txt", "w", encoding="utf-8") as error_file:
+                          error_file.write(message)
+                      report("failed", "failed", downloaded, total, speed, peers, seeders, message)
+                      raise SystemExit(1)
+
               report("running", "uploading", downloaded, total, 0, peers, seeders)
-              if status != 0:
-                  message = "Download failed or stalled. This usually means the torrent has no active seeders, no peers, or the source URL is unavailable."
-                  print(message)
-                  subprocess.run(["tail", "-n", "120", "aria2.log"], check=False)
-                  raise SystemExit(status)
           finally:
               try:
-                  rpc("aria2.shutdown")
+                  transmission_rpc("session-close")
               except Exception:
                   pass
+              daemon.terminate()
+              try:
+                  daemon.wait(timeout=20)
+              except subprocess.TimeoutExpired:
+                  daemon.kill()
           PY
 
       - name: Build upload manifest
