@@ -98,14 +98,12 @@ jobs:
         run: |
           mkdir -p out
           python3 - <<'PY'
-          import base64, hashlib, hmac, json, os, secrets, subprocess, time, urllib.error, urllib.parse, urllib.request
+          import hashlib, hmac, json, os, subprocess, time, urllib.error, urllib.parse, urllib.request
 
           callback_url = os.environ["CALLBACK_URL"]
           job_id = os.environ["JOB_ID"]
           webhook_secret = os.environ["WEBHOOK_SECRET"].encode()
           workflow_run_id = os.environ["WORKFLOW_RUN_ID"]
-          rpc_user = "ferry"
-          rpc_password = secrets.token_urlsafe(24)
           rpc_url = "http://127.0.0.1:9091/transmission/rpc"
           session_id = ""
           source_url = os.environ["SOURCE_URL"]
@@ -177,8 +175,6 @@ jobs:
                   "arguments": arguments or {},
               }).encode()
               headers = {
-                  "Authorization": "Basic "
-                  + base64.b64encode(f"{rpc_user}:{rpc_password}".encode()).decode(),
                   "Content-Type": "application/json",
                   "X-Transmission-Session-Id": session_id,
               }
@@ -190,7 +186,8 @@ jobs:
                   if exc.code == 409:
                       session_id = exc.headers["X-Transmission-Session-Id"]
                       return transmission_rpc(method, arguments)
-                  raise
+                  detail = exc.read().decode(errors="replace")
+                  raise RuntimeError(f"Transmission RPC HTTP {exc.code}: {detail[:300]}") from exc
               if result.get("result") != "success":
                   raise RuntimeError(result.get("result", "Transmission RPC failed"))
               return result.get("arguments", {})
@@ -201,12 +198,10 @@ jobs:
           settings = {
               "download-dir": os.path.abspath("out"),
               "incomplete-dir-enabled": False,
-              "rpc-authentication-required": True,
+              "rpc-authentication-required": False,
               "rpc-bind-address": "127.0.0.1",
               "rpc-enabled": True,
-              "rpc-password": rpc_password,
               "rpc-port": 9091,
-              "rpc-username": rpc_user,
               "rpc-whitelist-enabled": False,
               "dht-enabled": True,
               "pex-enabled": True,
@@ -231,7 +226,16 @@ jobs:
               stdout=subprocess.DEVNULL,
               stderr=subprocess.STDOUT,
           )
-          time.sleep(4)
+          last_ready_error = None
+          for _ in range(20):
+              try:
+                  transmission_rpc("session-get")
+                  break
+              except Exception as exc:
+                  last_ready_error = exc
+                  time.sleep(1)
+          else:
+              raise RuntimeError(f"Transmission RPC did not become ready: {last_ready_error}")
 
           downloaded = 0
           total = expected_total
