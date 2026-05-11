@@ -242,12 +242,11 @@ jobs:
                   "--connect-timeout=30",
                   "--lowest-speed-limit=1K",
                   "--summary-interval=0",
-                  "--console-log-level=warn",
+                  "--console-log-level=error",
                   "--log=aria2-http.log",
                   "--log-level=notice",
                   "--enable-rpc=true",
                   "--rpc-listen-all=false",
-                  "--rpc-listen-address=127.0.0.1",
                   "--rpc-listen-port=6801",
                   f"--rpc-secret={rpc_secret}",
                   url,
@@ -289,7 +288,8 @@ jobs:
                       message = "HTTP download failed or stalled."
                       with open("ferry-error-message.txt", "w", encoding="utf-8") as error_file:
                           error_file.write(message)
-                      subprocess.run(["tail", "-n", "120", "aria2-http.log"], check=False)
+                      if os.path.exists("aria2-http.log"):
+                          subprocess.run(["tail", "-n", "120", "aria2-http.log"], check=False)
                       raise SystemExit(status)
                   report("running", "uploading", downloaded, total, int(downloaded / elapsed))
               finally:
