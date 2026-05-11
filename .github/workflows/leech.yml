@@ -126,11 +126,15 @@ jobs:
               parsed = urllib.parse.urlparse(value)
               params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
               existing = {tracker for key, tracker in params if key == "tr"}
+              additions = []
               for tracker in extra_trackers:
                   if tracker not in existing:
-                      params.append(("tr", tracker))
+                      additions.append("tr=" + urllib.parse.quote(tracker, safe=""))
                       existing.add(tracker)
-              return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(params)))
+              if not additions:
+                  return value
+              separator = "&" if parsed.query else "?"
+              return value + separator + "&".join(additions)
 
           def expected_size(value):
               if not value.startswith("magnet:?"):
@@ -189,7 +193,7 @@ jobs:
                   detail = exc.read().decode(errors="replace")
                   raise RuntimeError(f"Transmission RPC HTTP {exc.code}: {detail[:300]}") from exc
               if result.get("result") != "success":
-                  raise RuntimeError(result.get("result", "Transmission RPC failed"))
+                  raise RuntimeError(f"Transmission RPC {method} failed: {result.get('result', 'unknown error')}")
               return result.get("arguments", {})
 
           settings_dir = os.path.expanduser("~/.config/transmission-daemon")
