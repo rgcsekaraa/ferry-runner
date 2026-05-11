@@ -98,7 +98,7 @@ jobs:
         run: |
           mkdir -p out
           python3 - <<'PY'
-          import hashlib, hmac, json, os, secrets, subprocess, time, urllib.error, urllib.parse, urllib.request
+          import base64, hashlib, hmac, json, os, secrets, subprocess, time, urllib.error, urllib.parse, urllib.request
 
           callback_url = os.environ["CALLBACK_URL"]
           job_id = os.environ["JOB_ID"]
@@ -177,17 +177,14 @@ jobs:
                   "arguments": arguments or {},
               }).encode()
               headers = {
+                  "Authorization": "Basic "
+                  + base64.b64encode(f"{rpc_user}:{rpc_password}".encode()).decode(),
                   "Content-Type": "application/json",
                   "X-Transmission-Session-Id": session_id,
               }
-              password_manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
-              password_manager.add_password(None, rpc_url, rpc_user, rpc_password)
-              opener = urllib.request.build_opener(
-                  urllib.request.HTTPBasicAuthHandler(password_manager)
-              )
               req = urllib.request.Request(rpc_url, data=payload, method="POST", headers=headers)
               try:
-                  with opener.open(req, timeout=15) as response:
+                  with urllib.request.urlopen(req, timeout=15) as response:
                       result = json.loads(response.read().decode())
               except urllib.error.HTTPError as exc:
                   if exc.code == 409:
