@@ -494,11 +494,35 @@ jobs:
 
       - name: Upload to Drive
         env:
+          CALLBACK_URL: ${{ inputs.callback_url }}
           DRIVE_FOLDER: ${{ inputs.drive_folder }}
+          JOB_ID: ${{ inputs.job_id }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
         run: |
+          python3 - <<'PY'
+          import hashlib, hmac, json, os, urllib.request
+          body = json.dumps({
+              "jobId": os.environ["JOB_ID"],
+              "status": "running",
+              "workflowRunId": os.environ["WORKFLOW_RUN_ID"],
+              "progressPhase": "uploading",
+          }, separators=(",", ":")).encode()
+          sig = "sha256=" + hmac.new(os.environ["WEBHOOK_SECRET"].encode(), body, hashlib.sha256).hexdigest()
+          req = urllib.request.Request(os.environ["CALLBACK_URL"], data=body, method="POST", headers={
+              "Content-Type": "application/json",
+              "User-Agent": "Ferry-Runner/1.0",
+              "X-Ferry-Signature": sig,
+          })
+          urllib.request.urlopen(req, timeout=20).read()
+          PY
+          echo "Ferry upload to Drive started"
           rclone mkdir "gdrive:${DRIVE_FOLDER}"
           rclone move out "gdrive:${DRIVE_FOLDER}" \
             --progress \
+            --stats=5s \
+            --stats-log-level=NOTICE \
+            --log-level=NOTICE \
             --transfers=8 \
             --checkers=16 \
             --drive-chunk-size=256M \
