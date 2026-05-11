@@ -147,6 +147,13 @@ jobs:
 
           expected_total = expected_size(source_url)
 
+          def format_bytes(value):
+              value = float(value or 0)
+              for unit in ["B", "KiB", "MiB", "GiB", "TiB"]:
+                  if value < 1024 or unit == "TiB":
+                      return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+                  value /= 1024
+
           def report(status, phase, downloaded=0, total=0, speed=0, peers=0, seeders=0, error=None):
               body = {
                   "jobId": job_id,
@@ -257,8 +264,9 @@ jobs:
 
               report("running", "downloading", 0, expected_total, 0, 0, 0)
               last_report = 0
-              no_progress_since = None
-              no_progress_timeout = 1800
+              last_progress_at = time.time()
+              last_progress_bytes = 0
+              no_progress_timeout = 600
 
               while True:
                   time.sleep(5)
@@ -296,19 +304,27 @@ jobs:
                   now = time.time()
                   if now - last_report >= 15:
                       report("running", "downloading", downloaded, total, speed, peers, seeders)
+                      percent_text = f"{percent_done * 100:.1f}%" if total else "unknown%"
+                      print(
+                          "Ferry progress: "
+                          f"{format_bytes(downloaded)} / {format_bytes(total)} "
+                          f"({percent_text}), {format_bytes(speed)}/s, "
+                          f"{peers} peers, {seeders} sending",
+                          flush=True,
+                      )
                       last_report = now
 
                   if percent_done >= 1:
                       break
 
-                  if downloaded == 0 and speed == 0:
-                      no_progress_since = no_progress_since or now
-                  else:
-                      no_progress_since = None
+                  if downloaded > last_progress_bytes:
+                      last_progress_bytes = downloaded
+                      last_progress_at = now
 
-                  if no_progress_since and now - no_progress_since >= no_progress_timeout:
+                  if speed == 0 and now - last_progress_at >= no_progress_timeout:
                       message = (
-                          f"Transmission could not download file pieces for {no_progress_timeout // 60} minutes. "
+                          f"Transmission made no file-piece progress for {no_progress_timeout // 60} minutes. "
+                          f"Downloaded: {format_bytes(downloaded)} of {format_bytes(total)}. "
                           f"Connected peers: {peers}; peers sending data: {seeders}."
                       )
                       with open("ferry-error-message.txt", "w", encoding="utf-8") as error_file:
