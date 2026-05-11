@@ -247,6 +247,7 @@ jobs:
                   "--log-level=notice",
                   "--enable-rpc=true",
                   "--rpc-listen-all=false",
+                  "--rpc-listen-address=127.0.0.1",
                   "--rpc-listen-port=6801",
                   f"--rpc-secret={rpc_secret}",
                   url,
@@ -270,7 +271,7 @@ jobs:
                               total = sum(int(item.get("totalLength", 0)) for item in items)
                               speed = sum(int(item.get("downloadSpeed", 0)) for item in active or [])
                           now = time.time()
-                          if now - last_report >= 5:
+                          if now - last_report >= 5 and not (total > 0 and downloaded >= total):
                               report("running", "downloading", downloaded, total, speed)
                               print(
                                   "Ferry HTTP progress: "
