@@ -74,11 +74,31 @@ jobs:
           restore-keys: |
             ferry-transmission-session-${{ runner.os }}-${{ github.repository_id }}-
 
+      - name: Restore rclone binary cache
+        id: rclone-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/rclone
+          key: ferry-rclone-v1.74.1-linux-amd64
+
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq jq transmission-daemon
-          curl -fsSL https://rclone.org/install.sh | sudo bash
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            ca-certificates \
+            curl \
+            jq \
+            transmission-daemon \
+            unzip
+
+          mkdir -p "$HOME/.local/bin"
+          if [ ! -x "$HOME/.local/bin/rclone" ]; then
+            curl -fsSLO https://downloads.rclone.org/v1.74.1/rclone-v1.74.1-linux-amd64.zip
+            unzip -q rclone-v1.74.1-linux-amd64.zip
+            install -m 755 rclone-v1.74.1-linux-amd64/rclone "$HOME/.local/bin/rclone"
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/rclone" version
 
       - name: Configure rclone
         env:
