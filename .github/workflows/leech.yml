@@ -21,13 +21,18 @@ on:
         required: false
         default: Ferry
         type: string
+      runner_label:
+        description: GitHub runner label, for example ubuntu-latest or a larger runner label
+        required: false
+        default: ubuntu-latest
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   leech:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner_label || vars.FERRY_RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 360
 
     steps:
@@ -108,6 +113,26 @@ jobs:
           mkdir -p ~/.config/rclone
           printf '%s' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
           rclone listremotes
+
+      - name: Measure runner network baseline
+        run: |
+          python3 - <<'PY'
+          import time, urllib.request
+
+          url = "https://speed.cloudflare.com/__down?bytes=100000000"
+          start = time.time()
+          bytes_read = 0
+          req = urllib.request.Request(url, headers={"User-Agent": "Ferry-Runner/1.0"})
+          with urllib.request.urlopen(req, timeout=60) as response:
+              while True:
+                  chunk = response.read(1024 * 1024)
+                  if not chunk:
+                      break
+                  bytes_read += len(chunk)
+          elapsed = max(time.time() - start, 0.001)
+          mibps = bytes_read / 1024 / 1024 / elapsed
+          print(f"Ferry network baseline: {mibps:.1f} MiB/s over HTTPS")
+          PY
 
       - name: Download source
         env:
